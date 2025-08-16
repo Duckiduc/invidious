@@ -36,6 +36,13 @@ def parse_related_video(related : JSON::Any) : Hash(String, JSON::Any)?
 
   LOGGER.trace("parse_related_video: Found \"watchNextEndScreenRenderer\" container")
 
+  if published_time_text = related["publishedTimeText"]?
+    decoded_time = decode_date(published_time_text["simpleText"].to_s)
+    published = decoded_time.to_rfc3339.to_s
+  else
+    published = nil
+  end
+
   # TODO: when refactoring video types, make a struct for related videos
   # or reuse an existing type, if that fits.
   return {
@@ -47,15 +54,16 @@ def parse_related_video(related : JSON::Any) : Hash(String, JSON::Any)?
     "view_count"       => JSON::Any.new(view_count || "0"),
     "short_view_count" => JSON::Any.new(short_view_count || "0"),
     "author_verified"  => JSON::Any.new(author_verified),
+    "published"        => JSON::Any.new(published || ""),
   }
 end
 
-def extract_video_info(video_id : String, proxy_region : String? = nil)
+def extract_video_info(video_id : String)
   # Init client config for the API
-  client_config = YoutubeAPI::ClientConfig.new(proxy_region: proxy_region)
+  client_config = YoutubeAPI::ClientConfig.new
 
   # Fetch data from the player endpoint
-  player_response = YoutubeAPI.player(video_id: video_id, params: "", client_config: client_config)
+  player_response = YoutubeAPI.player(video_id: video_id, params: "2AMB", client_config: client_config)
 
   playability_status = player_response.dig?("playabilityStatus", "status").try &.as_s
 
@@ -74,7 +82,7 @@ def extract_video_info(video_id : String, proxy_region : String? = nil)
         "reason"  => JSON::Any.new(reason),
       }
     end
-  elsif video_id != player_response.dig("videoDetails", "videoId")
+  elsif video_id != player_response.dig?("videoDetails", "videoId")
     # YouTube may return a different video player response than expected.
     # See: https://github.com/TeamNewPipe/NewPipe/issues/8713
     # Line to be reverted if one day we solve the video not available issue.
@@ -100,38 +108,49 @@ def extract_video_info(video_id : String, proxy_region : String? = nil)
   params = parse_video_info(video_id, player_response)
   params["reason"] = JSON::Any.new(reason) if reason
 
-  new_player_response = nil
+  if !CONFIG.invidious_companion.present?
+    if player_response.dig?("streamingData", "adaptiveFormats", 0, "url").nil?
+      LOGGER.warn("Missing URLs for adaptive formats, falling back to other YT clients.")
+      players_fallback = {YoutubeAPI::ClientType::TvHtml5, YoutubeAPI::ClientType::WebMobile}
 
-  if reason.nil?
-    # Fetch the video streams using an Android client in order to get the
-    # decrypted URLs and maybe fix throttling issues (#2194). See the
-    # following issue for an explanation about decrypted URLs:
-    # https://github.com/TeamNewPipe/NewPipeExtractor/issues/562
-    client_config.client_type = YoutubeAPI::ClientType::Android
-    new_player_response = try_fetch_streaming_data(video_id, client_config)
-  elsif !reason.includes?("your country") # Handled separately
-    # The Android embedded client could help here
-    client_config.client_type = YoutubeAPI::ClientType::AndroidScreenEmbed
-    new_player_response = try_fetch_streaming_data(video_id, client_config)
+      players_fallback.each do |player_fallback|
+        client_config.client_type = player_fallback
+
+        next if !(player_fallback_response = try_fetch_streaming_data(video_id, client_config))
+
+        if player_fallback_response.dig?("streamingData", "adaptiveFormats", 0, "url")
+          streaming_data = player_response["streamingData"].as_h
+          streaming_data["adaptiveFormats"] = player_fallback_response["streamingData"]["adaptiveFormats"]
+          player_response["streamingData"] = JSON::Any.new(streaming_data)
+          break
+        end
+      rescue InfoException
+        next LOGGER.warn("Failed to fetch streams with #{player_fallback}")
+      end
+    end
+
+    # Seems like video page can still render even without playable streams.
+    # its better than nothing.
+    #
+    # # Were we able to find playable video streams?
+    # if player_response.dig?("streamingData", "adaptiveFormats", 0, "url").nil?
+    #   # No :(
+    # end
   end
 
-  # Last hope
-  if new_player_response.nil?
-    client_config.client_type = YoutubeAPI::ClientType::TvHtml5ScreenEmbed
-    new_player_response = try_fetch_streaming_data(video_id, client_config)
-  end
-
-  # Replace player response and reset reason
-  if !new_player_response.nil?
-    # Preserve storyboard data before replacement
-    new_player_response["storyboards"] = player_response["storyboards"] if player_response["storyboards"]?
-
-    player_response = new_player_response
-    params.delete("reason")
-  end
-
-  {"captions", "playabilityStatus", "playerConfig", "storyboards", "streamingData"}.each do |f|
+  {"captions", "playabilityStatus", "playerConfig", "storyboards"}.each do |f|
     params[f] = player_response[f] if player_response[f]?
+  end
+
+  # Convert URLs, if those are present
+  if streaming_data = player_response["streamingData"]?
+    %w[formats adaptiveFormats].each do |key|
+      streaming_data.as_h[key]?.try &.as_a.each do |format|
+        format.as_h["url"] = JSON::Any.new(convert_url(format))
+      end
+    end
+
+    params["streamingData"] = streaming_data
   end
 
   # Data structure version, for cache control
@@ -142,17 +161,15 @@ end
 
 def try_fetch_streaming_data(id : String, client_config : YoutubeAPI::ClientConfig) : Hash(String, JSON::Any)?
   LOGGER.debug("try_fetch_streaming_data: [#{id}] Using #{client_config.client_type} client.")
-  # CgIIAdgDAQ%3D%3D is a workaround for streaming URLs that returns a 403.
-  # https://github.com/LuanRT/YouTube.js/pull/624
-  response = YoutubeAPI.player(video_id: id, params: "CgIIAdgDAQ%3D%3D", client_config: client_config)
+  response = YoutubeAPI.player(video_id: id, params: "2AMB", client_config: client_config)
 
   playability_status = response["playabilityStatus"]["status"]
   LOGGER.debug("try_fetch_streaming_data: [#{id}] Got playabilityStatus == #{playability_status}.")
 
-  if id != response.dig("videoDetails", "videoId")
+  if id != response.dig?("videoDetails", "videoId")
     # YouTube may return a different video player response than expected.
     # See: https://github.com/TeamNewPipe/NewPipe/issues/8713
-    raise VideoNotAvailableException.new(
+    raise InfoException.new(
       "The video returned by YouTube isn't the requested one. (#{client_config.client_type} client)"
     )
   elsif playability_status == "OK"
@@ -185,10 +202,11 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
   end
 
   video_details = player_response.dig?("videoDetails")
-  microformat = player_response.dig?("microformat", "playerMicroformatRenderer")
+  if !(microformat = player_response.dig?("microformat", "playerMicroformatRenderer"))
+    microformat = {} of String => JSON::Any
+  end
 
   raise BrokenTubeException.new("videoDetails") if !video_details
-  raise BrokenTubeException.new("microformat") if !microformat
 
   # Basic video infos
 
@@ -213,7 +231,19 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
   premiere_timestamp = microformat.dig?("liveBroadcastDetails", "startTimestamp")
     .try { |t| Time.parse_rfc3339(t.as_s) }
 
+  premiere_timestamp ||= player_response.dig?(
+    "playabilityStatus", "liveStreamability",
+    "liveStreamabilityRenderer", "offlineSlate",
+    "liveStreamOfflineSlateRenderer", "scheduledStartTime"
+  )
+    .try &.as_s.to_i64
+      .try { |t| Time.unix(t) }
+
   live_now = microformat.dig?("liveBroadcastDetails", "isLiveNow")
+    .try &.as_bool
+  live_now ||= video_details.dig?("isLive").try &.as_bool || false
+
+  post_live_dvr = video_details.dig?("isPostLiveDvr")
     .try &.as_bool || false
 
   # Extra video infos
@@ -222,7 +252,7 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
     .try &.as_a.map &.as_s || [] of String
 
   allow_ratings = video_details["allowRatings"]?.try &.as_bool
-  family_friendly = microformat["isFamilySafe"].try &.as_bool
+  family_friendly = microformat["isFamilySafe"]?.try &.as_bool
   is_listed = video_details["isCrawlable"]?.try &.as_bool
   is_upcoming = video_details["isUpcoming"]?.try &.as_bool
 
@@ -267,7 +297,18 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
     .try &.dig?("videoActions", "menuRenderer", "topLevelButtons")
 
   if toplevel_buttons
-    likes_button = toplevel_buttons.try &.as_a
+    # New Format as of december 2023
+    likes_button = toplevel_buttons.dig?(0,
+      "segmentedLikeDislikeButtonViewModel",
+      "likeButtonViewModel",
+      "likeButtonViewModel",
+      "toggleButtonViewModel",
+      "toggleButtonViewModel",
+      "defaultButtonViewModel",
+      "buttonViewModel"
+    )
+
+    likes_button ||= toplevel_buttons.try &.as_a
       .find(&.dig?("toggleButtonRenderer", "defaultIcon", "iconType").=== "LIKE")
       .try &.["toggleButtonRenderer"]
 
@@ -280,9 +321,10 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
       )
 
     if likes_button
+      likes_txt = likes_button.dig?("accessibilityText")
       # Note: The like count from `toggledText` is off by one, as it would
       # represent the new like count in the event where the user clicks on "like".
-      likes_txt = (likes_button["defaultText"]? || likes_button["toggledText"]?)
+      likes_txt ||= (likes_button["defaultText"]? || likes_button["toggledText"]?)
         .try &.dig?("accessibility", "accessibilityData", "label")
       likes = likes_txt.as_s.gsub(/\D/, "").to_i64? if likes_txt
 
@@ -405,6 +447,7 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
     "isListed"         => JSON::Any.new(is_listed || false),
     "isUpcoming"       => JSON::Any.new(is_upcoming || false),
     "keywords"         => JSON::Any.new(keywords.map { |v| JSON::Any.new(v) }),
+    "isPostLiveDvr"    => JSON::Any.new(post_live_dvr),
     # Related videos
     "relatedVideos" => JSON::Any.new(related),
     # Description
@@ -413,7 +456,7 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
     "shortDescription" => JSON::Any.new(short_description.try &.as_s || nil),
     # Video metadata
     "genre"     => JSON::Any.new(genre.try &.as_s || ""),
-    "genreUcid" => JSON::Any.new(genre_ucid.try &.as_s || ""),
+    "genreUcid" => JSON::Any.new(genre_ucid.try &.as_s?),
     "license"   => JSON::Any.new(license.try &.as_s || ""),
     # Music section
     "music" => JSON.parse(music_list.to_json),
@@ -426,4 +469,36 @@ def parse_video_info(video_id : String, player_response : Hash(String, JSON::Any
   }
 
   return params
+end
+
+private def convert_url(fmt)
+  if cfr = fmt["signatureCipher"]?.try { |json| HTTP::Params.parse(json.as_s) }
+    sp = cfr["sp"]
+    url = URI.parse(cfr["url"])
+    params = url.query_params
+
+    LOGGER.debug("convert_url: Decoding '#{cfr}'")
+
+    unsig = DECRYPT_FUNCTION.try &.decrypt_signature(cfr["s"])
+    params[sp] = unsig if unsig
+  else
+    url = URI.parse(fmt["url"].as_s)
+    params = url.query_params
+  end
+
+  n = DECRYPT_FUNCTION.try &.decrypt_nsig(params["n"])
+  params["n"] = n if n
+
+  if token = CONFIG.po_token
+    params["pot"] = token
+  end
+
+  url.query_params = params
+  LOGGER.trace("convert_url: new url is '#{url}'")
+
+  return url.to_s
+rescue ex
+  LOGGER.debug("convert_url: Error when parsing video URL")
+  LOGGER.trace(ex.inspect_with_backtrace)
+  return ""
 end

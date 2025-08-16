@@ -1,4 +1,4 @@
-name: Build and release container
+name: Build and release container directly from master
 
 on:
   push:
@@ -21,20 +21,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Crystal
-        uses: crystal-lang/install-crystal@v1.8.0
-        with:
-          crystal: 1.9.2
-
-      - name: Run lint
-        run: |
-          if ! crystal tool format --check; then
-            crystal tool format
-            git diff
-            exit 1
-          fi
+        uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -58,12 +45,12 @@ jobs:
           images: quay.io/invidious/invidious
           tags: |
             type=sha,format=short,prefix={{date 'YYYY.MM.DD'}}-,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
+            type=raw,value=master,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
           labels: |
             quay.expires-after=12w
 
       - name: Build and push Docker AMD64 image for Push Event
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
@@ -83,12 +70,12 @@ jobs:
             suffix=-arm64
           tags: |
             type=sha,format=short,prefix={{date 'YYYY.MM.DD'}}-,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
-            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
+            type=raw,value=master,enable=${{ github.ref == format('refs/heads/{0}', 'master') }}
           labels: |
             quay.expires-after=12w
 
       - name: Build and push Docker ARM64 image for Push Event
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile.arm64

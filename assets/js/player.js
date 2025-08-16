@@ -3,7 +3,6 @@ var player_data = JSON.parse(document.getElementById('player_data').textContent)
 var video_data = JSON.parse(document.getElementById('video_data').textContent);
 
 var options = {
-    preload: 'auto',
     liveui: true,
     playbackRates: [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0],
     controlBar: {
@@ -135,26 +134,32 @@ player.on('timeupdate', function () {
     // YouTube links
 
     let elem_yt_watch = document.getElementById('link-yt-watch');
+    if (elem_yt_watch) {
+        let base_url_yt_watch = elem_yt_watch.getAttribute('data-base-url');
+        elem_yt_watch.href = addCurrentTimeToURL(base_url_yt_watch);
+    }
+    
     let elem_yt_embed = document.getElementById('link-yt-embed');
-
-    let base_url_yt_watch = elem_yt_watch.getAttribute('data-base-url');
-    let base_url_yt_embed = elem_yt_embed.getAttribute('data-base-url');
-
-    elem_yt_watch.href = addCurrentTimeToURL(base_url_yt_watch);
-    elem_yt_embed.href = addCurrentTimeToURL(base_url_yt_embed);
+    if (elem_yt_embed) {
+        let base_url_yt_embed = elem_yt_embed.getAttribute('data-base-url');
+        elem_yt_embed.href = addCurrentTimeToURL(base_url_yt_embed);
+    }
 
     // Invidious links
 
     let domain = window.location.origin;
 
     let elem_iv_embed = document.getElementById('link-iv-embed');
+    if (elem_iv_embed) {
+        let base_url_iv_embed = elem_iv_embed.getAttribute('data-base-url');
+        elem_iv_embed.href = addCurrentTimeToURL(base_url_iv_embed, domain);
+    }
+    
     let elem_iv_other = document.getElementById('link-iv-other');
-
-    let base_url_iv_embed = elem_iv_embed.getAttribute('data-base-url');
-    let base_url_iv_other = elem_iv_other.getAttribute('data-base-url');
-
-    elem_iv_embed.href = addCurrentTimeToURL(base_url_iv_embed, domain);
-    elem_iv_other.href = addCurrentTimeToURL(base_url_iv_other, domain);
+    if (elem_iv_other) {
+        let base_url_iv_other = elem_iv_other.getAttribute('data-base-url');
+        elem_iv_other.href = addCurrentTimeToURL(base_url_iv_other, domain);
+    }
 });
 
 
@@ -351,7 +356,12 @@ if (video_data.params.save_player_pos) {
     const rememberedTime = get_video_time();
     let lastUpdated = 0;
 
-    if(!hasTimeParam) set_seconds_after_start(rememberedTime);
+    if(!hasTimeParam) {
+      if (rememberedTime >= video_data.length_seconds - 20)
+        set_seconds_after_start(0);
+      else
+        set_seconds_after_start(rememberedTime);
+    }
 
     player.on('timeupdate', function () {
         const raw = player.currentTime();

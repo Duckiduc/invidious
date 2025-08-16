@@ -42,6 +42,9 @@ module Invidious::Routes::API::V1::Misc
     format = env.params.query["format"]?
     format ||= "json"
 
+    listen_param = env.params.query["listen"]?
+    listen = (listen_param == "true" || listen_param == "1")
+
     if plid.starts_with? "RD"
       return env.redirect "/api/v1/mixes/#{plid}"
     end
@@ -74,7 +77,9 @@ module Invidious::Routes::API::V1::Misc
       response = playlist.to_json(offset, video_id: video_id)
       json_response = JSON.parse(response)
 
-      if json_response["videos"].as_a[0]["index"] != offset
+      if json_response["videos"].as_a.empty?
+        json_response = JSON.parse(response)
+      elsif json_response["videos"].as_a[0]["index"] != offset
         offset = json_response["videos"].as_a[0]["index"].as_i
         lookback = offset < 50 ? offset : 50
         response = playlist.to_json(offset - lookback)
@@ -83,7 +88,7 @@ module Invidious::Routes::API::V1::Misc
     end
 
     if format == "html"
-      playlist_html = template_playlist(json_response)
+      playlist_html = template_playlist(json_response, listen)
       index, next_video = json_response["videos"].as_a.skip(1 + lookback).select { |video| !video["author"].as_s.empty? }[0]?.try { |v| {v["index"], v["videoId"]} } || {nil, nil}
 
       response = {
@@ -108,6 +113,9 @@ module Invidious::Routes::API::V1::Misc
 
     format = env.params.query["format"]?
     format ||= "json"
+
+    listen_param = env.params.query["listen"]?
+    listen = (listen_param == "true" || listen_param == "1")
 
     begin
       mix = fetch_mix(rdid, continuation, locale: locale)
@@ -139,9 +147,7 @@ module Invidious::Routes::API::V1::Misc
                 json.field "authorUrl", "/channel/#{video.ucid}"
 
                 json.field "videoThumbnails" do
-                  json.array do
-                    Invidious::JSONify::APIv1.thumbnails(json, video.id)
-                  end
+                  Invidious::JSONify::APIv1.thumbnails(json, video.id)
                 end
 
                 json.field "index", video.index
@@ -155,7 +161,7 @@ module Invidious::Routes::API::V1::Misc
 
     if format == "html"
       response = JSON.parse(response)
-      playlist_html = template_mix(response)
+      playlist_html = template_mix(response, listen)
       next_video = response["videos"].as_a.select { |video| !video["author"].as_s.empty? }[0]?.try &.["videoId"]
 
       response = {
@@ -177,8 +183,8 @@ module Invidious::Routes::API::V1::Misc
     begin
       resolved_url = YoutubeAPI.resolve_url(url.as(String))
       endpoint = resolved_url["endpoint"]
-      pageType = endpoint.dig?("commandMetadata", "webCommandMetadata", "webPageType").try &.as_s || ""
-      if pageType == "WEB_PAGE_TYPE_UNKNOWN"
+      page_type = endpoint.dig?("commandMetadata", "webCommandMetadata", "webPageType").try &.as_s || ""
+      if page_type == "WEB_PAGE_TYPE_UNKNOWN"
         return error_json(400, "Unknown url")
       end
 
@@ -194,7 +200,7 @@ module Invidious::Routes::API::V1::Misc
         json.field "playlistId", sub_endpoint["playlistId"].as_s if sub_endpoint["playlistId"]?
         json.field "startTimeSeconds", sub_endpoint["startTimeSeconds"].as_i if sub_endpoint["startTimeSeconds"]?
         json.field "params", params.try &.as_s
-        json.field "pageType", pageType
+        json.field "pageType", page_type
       end
     end
   end
